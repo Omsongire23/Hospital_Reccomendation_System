@@ -1,5 +1,6 @@
 Flask==2.3.2
-pandas==1.5.3
-numpy==1.21.6
+pandas==2.0.3
+numpy==1.24.3
 fuzzywuzzy==0.18.0
+python-Levenshtein==0.21.1
 gunicorn==20.1.0
