@@ -1,12 +1,21 @@
 from flask import Flask, request, jsonify, render_template
-import pandas as pd
-import numpy as np
-from math import radians, sin, cos, sqrt, atan2
-from fuzzywuzzy import fuzz
-import pickle
 import os
+import pickle
 
+# Initialize Flask app first
 app = Flask(__name__)
+
+# Try to import pandas and numpy with error handling
+try:
+    import pandas as pd
+    import numpy as np
+    from math import radians, sin, cos, sqrt, atan2
+    from fuzzywuzzy import fuzz
+    DEPENDENCIES_LOADED = True
+    print("All dependencies loaded successfully")
+except ImportError as e:
+    print(f"Error importing dependencies: {e}")
+    DEPENDENCIES_LOADED = False
 
 # Try multiple possible pickle file names
 POSSIBLE_PICKLE_NAMES = [
@@ -147,6 +156,7 @@ def health():
     
     debug_info = {
         "status": "healthy",
+        "dependencies_loaded": DEPENDENCIES_LOADED,
         "data_loaded": df is not None,
         "hospital_count": len(df) if df is not None else 0,
         "current_directory": current_dir,
