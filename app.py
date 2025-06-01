@@ -8,24 +8,66 @@ import os
 
 app = Flask(__name__)
 
-# Use relative path for pickle file (same directory)
-PICKLE_PATH = "hospital_data.pkl"
+# Try multiple possible pickle file names
+POSSIBLE_PICKLE_NAMES = [
+    "hospital_data.pkl",
+    "hospitals.pkl", 
+    "data.pkl",
+    "hospital_dataset.pkl",
+    "hospital_info.pkl"
+]
+
+def find_and_load_pickle():
+    current_dir = os.getcwd()
+    print(f"Current directory: {current_dir}")
+    print(f"Files in directory: {os.listdir('.')}")
+    
+    # Try different paths
+    possible_paths = [
+        "hospital_data.pkl",
+        os.path.join(current_dir, "hospital_data.pkl"),
+        "./hospital_data.pkl"
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            print(f"Found pickle file at: {path}")
+            try:
+                with open(path, 'rb') as f:
+                    df = pickle.load(f)
+                print(f"Successfully loaded {len(df)} hospital records")
+                return df
+            except Exception as e:
+                print(f"Error loading {path}: {str(e)}")
+                continue
+    
+    print("No pickle file found with any of the expected paths")
+    return None
 
 def load_pickle_data(pickle_path):
     try:
+        # Check if file exists first
+        if not os.path.exists(pickle_path):
+            print(f"File {pickle_path} does not exist")
+            print(f"Current directory: {os.getcwd()}")
+            print(f"Files in current directory: {os.listdir('.')}")
+            return None
+            
         with open(pickle_path, 'rb') as f:
             df = pickle.load(f)
         print(f"Successfully loaded {len(df)} hospital records")
         return df
     except FileNotFoundError:
         print(f"Error: Pickle file {pickle_path} not found.")
+        print(f"Current directory: {os.getcwd()}")
+        print(f"Files in current directory: {os.listdir('.')}")
         return None
     except Exception as e:
         print(f"Error loading pickle file: {str(e)}")
         return None
 
 # Load DataFrame
-df = load_pickle_data(PICKLE_PATH)
+df = find_and_load_pickle()
 
 # Haversine formula to calculate distance between two coordinates (in kilometers)
 def haversine(lat1, lon1, lat2, lon2):
@@ -89,11 +131,23 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=1, similarity_thre
 # Health check endpoint
 @app.route('/health')
 def health():
-    return jsonify({
+    current_dir = os.getcwd()
+    files_in_dir = os.listdir('.')
+    pickle_exists = os.path.exists("hospital_data.pkl")
+    
+    debug_info = {
         "status": "healthy",
         "data_loaded": df is not None,
-        "hospital_count": len(df) if df is not None else 0
-    })
+        "hospital_count": len(df) if df is not None else 0,
+        "current_directory": current_dir,
+        "files_in_directory": files_in_dir,
+        "pickle_file_exists": pickle_exists
+    }
+    
+    if df is not None:
+        debug_info["sample_columns"] = list(df.columns)
+        
+    return jsonify(debug_info)
 
 # API endpoint for Android app
 @app.route('/api/recommend', methods=['POST'])
