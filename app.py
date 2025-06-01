@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template
 import os
 import pickle
+import json
 
 # Initialize Flask app first
 app = Flask(__name__)
@@ -17,76 +18,72 @@ except ImportError as e:
     print(f"Error importing dependencies: {e}")
     DEPENDENCIES_LOADED = False
 
-# Try multiple possible pickle file names
-POSSIBLE_PICKLE_NAMES = [
-    "hospital_data.pkl",
-    "hospitals.pkl", 
-    "data.pkl",
-    "hospital_dataset.pkl",
-    "hospital_info.pkl"
-]
-
-def find_and_load_pickle():
+def load_hospital_data():
+    """Try to load hospital data from multiple formats"""
     current_dir = os.getcwd()
     print(f"Current directory: {current_dir}")
     print(f"Files in directory: {os.listdir('.')}")
     
-    # Try different paths
-    possible_paths = [
-        "hospital_data.pkl",
-        os.path.join(current_dir, "hospital_data.pkl"),
-        "./hospital_data.pkl"
+    # Try different file formats in order of preference
+    data_files = [
+        ("hospital_data.csv", "csv"),
+        ("hospital_data.json", "json"),
+        ("hospital_data.pkl", "pickle"),
+        ("hospitals.csv", "csv"),
+        ("hospitals.json", "json"),
+        ("hospitals.pkl", "pickle"),
+        ("data.csv", "csv"),
+        ("data.json", "json"),
+        ("data.pkl", "pickle")
     ]
     
-    for path in possible_paths:
-        if os.path.exists(path):
-            print(f"Found pickle file at: {path}")
+    for filename, file_type in data_files:
+        if os.path.exists(filename):
+            print(f"Found {file_type} file: {filename}")
             try:
-                # Try loading with different protocols
-                with open(path, 'rb') as f:
-                    df = pickle.load(f)
-                print(f"Successfully loaded {len(df)} hospital records")
-                return df
-            except Exception as e:
-                print(f"Error loading {path}: {str(e)}")
-                # Try alternative loading method
-                try:
-                    import pandas as pd
-                    # If it's a pandas pickle, try loading directly with pandas
-                    df = pd.read_pickle(path)
-                    print(f"Successfully loaded {len(df)} records using pandas")
+                if file_type == "csv":
+                    df = pd.read_csv(filename)
+                    print(f"Successfully loaded {len(df)} records from CSV")
                     return df
-                except Exception as e2:
-                    print(f"Alternative loading failed: {str(e2)}")
+                elif file_type == "json":
+                    df = pd.read_json(filename)
+                    print(f"Successfully loaded {len(df)} records from JSON")
+                    return df
+                elif file_type == "pickle":
+                    # Try multiple pickle loading methods
+                    df = load_pickle_safe(filename)
+                    if df is not None:
+                        return df
+            except Exception as e:
+                print(f"Error loading {filename}: {str(e)}")
                 continue
     
-    print("No pickle file found with any of the expected paths")
+    print("No valid data file found")
     return None
 
-def load_pickle_data(pickle_path):
-    try:
-        # Check if file exists first
-        if not os.path.exists(pickle_path):
-            print(f"File {pickle_path} does not exist")
-            print(f"Current directory: {os.getcwd()}")
-            print(f"Files in current directory: {os.listdir('.')}")
-            return None
-            
-        with open(pickle_path, 'rb') as f:
-            df = pickle.load(f)
-        print(f"Successfully loaded {len(df)} hospital records")
-        return df
-    except FileNotFoundError:
-        print(f"Error: Pickle file {pickle_path} not found.")
-        print(f"Current directory: {os.getcwd()}")
-        print(f"Files in current directory: {os.listdir('.')}")
-        return None
-    except Exception as e:
-        print(f"Error loading pickle file: {str(e)}")
-        return None
+def load_pickle_safe(filepath):
+    """Safely load pickle file with multiple methods"""
+    methods = [
+        lambda: pickle.load(open(filepath, 'rb')),
+        lambda: pd.read_pickle(filepath),
+        lambda: pickle.load(open(filepath, 'rb'), encoding='latin1'),
+        lambda: pickle.load(open(filepath, 'rb'), fix_imports=True),
+    ]
+    
+    for i, method in enumerate(methods):
+        try:
+            print(f"Trying pickle loading method {i+1}")
+            df = method()
+            print(f"Successfully loaded {len(df)} records using method {i+1}")
+            return df
+        except Exception as e:
+            print(f"Method {i+1} failed: {str(e)}")
+            continue
+    
+    return None
 
 # Load DataFrame
-df = find_and_load_pickle()
+df = load_hospital_data()
 
 # Haversine formula to calculate distance between two coordinates (in kilometers)
 def haversine(lat1, lon1, lat2, lon2):
@@ -108,28 +105,45 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=1, similarity_thre
     if not (-90 <= user_lat <= 90 and -180 <= user_lon <= 180):
         return {"error": "Invalid coordinates provided. Latitude must be between -90 and 90, Longitude between -180 and 180."}
 
-    # Clean and standardize specialties (should already be clean from pickle)
-    df = df.copy()  # Create a copy to avoid modifying the original
+    # Clean and standardize specialties
+    df = df.copy()
     disease = disease.lower().strip()
 
-    # Fuzzy matching for specialties
-    def match_disease(specialties):
-        if not specialties:
+    # Handle different specialty column formats
+    specialty_columns = ['Specialties', 'specialties', 'Specialty', 'specialty']
+    specialty_col = None
+    for col in specialty_columns:
+        if col in df.columns:
+            specialty_col = col
+            break
+    
+    if specialty_col is None:
+        print("Warning: No specialty column found, using all hospitals")
+        matching_hospitals = df.copy()
+    else:
+        # Fuzzy matching for specialties
+        def match_disease(specialties):
+            if pd.isna(specialties) or not specialties:
+                return False
+            # Handle both string and list formats
+            if isinstance(specialties, str):
+                return fuzz.partial_ratio(disease, specialties.lower()) >= similarity_threshold
+            elif isinstance(specialties, list):
+                for specialty in specialties:
+                    if fuzz.partial_ratio(disease, str(specialty).lower()) >= similarity_threshold:
+                        return True
             return False
-        for specialty in specialties:
-            if fuzz.partial_ratio(disease, str(specialty).lower()) >= similarity_threshold:
-                return True
-        return False
 
-    # Filter hospitals with matching specialties
-    matching_hospitals = df[df['Specialties'].apply(match_disease)].copy()
+        # Filter hospitals with matching specialties
+        matching_hospitals = df[df[specialty_col].apply(match_disease)].copy()
 
-    # If no hospitals match, fall back to hospitals with empty specialties
-    if matching_hospitals.empty:
-        matching_hospitals = df[df['Specialties'].apply(len) == 0].copy()
+        # If no hospitals match, use all hospitals
+        if matching_hospitals.empty:
+            print(f"No hospitals found for '{disease}', using all hospitals")
+            matching_hospitals = df.copy()
 
     if matching_hospitals.empty:
-        return {"error": "No hospitals found for the specified disease."}
+        return {"error": "No hospitals found."}
 
     # Calculate distances to all matching hospitals
     matching_hospitals.loc[:, 'Distance'] = matching_hospitals.apply(
@@ -139,12 +153,16 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=1, similarity_thre
     # Sort by distance and select top N
     nearest_hospitals = matching_hospitals.sort_values(by='Distance').head(top_n)
 
-    # Prepare the result
-    result = nearest_hospitals[[
+    # Prepare the result with flexible column names
+    result_columns = [
         'Hospital_Name', 'Address_Original_First_Line', 'State', 'District', 'Pincode',
         'Telephone', 'Mobile_Number', 'Emergency_Num', 'Facilities', 'Distance'
-    ]].to_dict(orient='records')
-
+    ]
+    
+    # Use available columns
+    available_columns = [col for col in result_columns if col in nearest_hospitals.columns]
+    
+    result = nearest_hospitals[available_columns].to_dict(orient='records')
     return result
 
 # Health check endpoint
@@ -152,7 +170,6 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=1, similarity_thre
 def health():
     current_dir = os.getcwd()
     files_in_dir = os.listdir('.')
-    pickle_exists = os.path.exists("hospital_data.pkl")
     
     debug_info = {
         "status": "healthy",
@@ -160,12 +177,12 @@ def health():
         "data_loaded": df is not None,
         "hospital_count": len(df) if df is not None else 0,
         "current_directory": current_dir,
-        "files_in_directory": files_in_dir,
-        "pickle_file_exists": pickle_exists
+        "files_in_directory": files_in_dir
     }
     
     if df is not None:
         debug_info["sample_columns"] = list(df.columns)
+        debug_info["sample_data"] = df.head(1).to_dict(orient='records')
         
     return jsonify(debug_info)
 
@@ -251,7 +268,7 @@ def api_recommend_get():
     except Exception as e:
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
-# Route for the home page with the input form (optional - for testing)
+# Route for the home page
 @app.route('/')
 def home():
     return """
@@ -274,28 +291,6 @@ def home():
     </pre>
     <p>GET /api/recommend?latitude=19.9975&longitude=73.7898&disease=cardiology&top_n=5</p>
     """
-
-# Route to handle the recommendation request (keeping for backward compatibility)
-@app.route('/recommend', methods=['POST'])
-def recommend():
-    try:
-        # Get form data
-        user_lat = float(request.form['latitude'])
-        user_lon = float(request.form['longitude'])
-        disease = request.form['disease']
-
-        # Get recommendations
-        recommendations = recommend_hospital(user_lat, user_lon, disease, df)
-
-        # Return JSON response instead of template
-        return jsonify({
-            "success": True,
-            "hospitals": recommendations
-        })
-    except ValueError:
-        return jsonify({"error": "Invalid input. Please enter valid numeric coordinates."}), 400
-    except Exception as e:
-        return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
