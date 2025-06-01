@@ -33,12 +33,22 @@ def find_and_load_pickle():
         if os.path.exists(path):
             print(f"Found pickle file at: {path}")
             try:
+                # Try loading with different protocols
                 with open(path, 'rb') as f:
                     df = pickle.load(f)
                 print(f"Successfully loaded {len(df)} hospital records")
                 return df
             except Exception as e:
                 print(f"Error loading {path}: {str(e)}")
+                # Try alternative loading method
+                try:
+                    import pandas as pd
+                    # If it's a pandas pickle, try loading directly with pandas
+                    df = pd.read_pickle(path)
+                    print(f"Successfully loaded {len(df)} records using pandas")
+                    return df
+                except Exception as e2:
+                    print(f"Alternative loading failed: {str(e2)}")
                 continue
     
     print("No pickle file found with any of the expected paths")
