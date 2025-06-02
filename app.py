@@ -1,10 +1,18 @@
 import os
 import sys
-
-# Initialize Flask app first
+import logging
 from flask import Flask, request, jsonify
+import pandas as pd
+import numpy as np
+from math import radians, sin, cos, sqrt, atan2
+from fuzzywuzzy import fuzz
 
+# Initialize Flask app
 app = Flask(__name__)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Global variables
 df = None
@@ -19,26 +27,23 @@ def load_dependencies():
         from math import radians, sin, cos, sqrt, atan2
         from fuzzywuzzy import fuzz
         DEPENDENCIES_LOADED = True
-        print("✓ All dependencies loaded successfully")
+        logger.info("✓ All dependencies loaded successfully")
         return True
     except ImportError as e:
-        print(f"✗ Error importing dependencies: {e}")
+        logger.error(f"✗ Error importing dependencies: {e}")
         DEPENDENCIES_LOADED = False
         return False
 
 def load_hospital_data():
     """Try to load hospital data from multiple formats"""
     if not DEPENDENCIES_LOADED:
-        print("Dependencies not loaded, skipping data loading")
+        logger.error("Dependencies not loaded, skipping data loading")
         return None
-        
-    import pandas as pd
-    
+
     current_dir = os.getcwd()
-    print(f"Current directory: {current_dir}")
-    print(f"Files in directory: {os.listdir('.')}")
+    logger.info(f"Current directory: {current_dir}")
+    logger.info(f"Files in directory: {os.listdir('.')}")
     
-    # Try different file formats in order of preference
     data_files = [
         ("hospital_data.csv", "csv"),
         ("hospital_data.json", "json"),
@@ -50,30 +55,29 @@ def load_hospital_data():
     for filename, file_type in data_files:
         file_path = os.path.join(current_dir, filename)
         if os.path.exists(file_path):
-            print(f"Found {file_type} file: {filename}")
+            logger.info(f"Found {file_type} file: {filename}")
             try:
                 if file_type == "csv":
                     df = pd.read_csv(file_path)
-                    # Handle specialties column if it exists
                     if 'Specialties' in df.columns:
                         df['Specialties'] = df['Specialties'].apply(safe_eval_specialties)
-                    print(f"✓ Successfully loaded {len(df)} records from CSV")
+                    logger.info(f"✓ Successfully loaded {len(df)} records from CSV")
                     return df
                 elif file_type == "json":
                     df = pd.read_json(file_path)
-                    print(f"✓ Successfully loaded {len(df)} records from JSON")
+                    logger.info(f"✓ Successfully loaded {len(df)} records from JSON")
                     return df
                 elif file_type == "pickle":
                     import pickle
                     with open(file_path, 'rb') as f:
                         df = pickle.load(f)
-                    print(f"✓ Successfully loaded {len(df)} records from pickle")
+                    logger.info(f"✓ Successfully loaded {len(df)} records from pickle")
                     return df
             except Exception as e:
-                print(f"✗ Error loading {filename}: {str(e)}")
+                logger.error(f"✗ Error loading {filename}: {str(e)}")
                 continue
     
-    print("No valid data file found")
+    logger.error("No valid data file found")
     return None
 
 def safe_eval_specialties(x):
@@ -98,8 +102,6 @@ def haversine(lat1, lon1, lat2, lon2):
     """Calculate distance between two coordinates in kilometers"""
     if not DEPENDENCIES_LOADED:
         return 0
-        
-    from math import radians, sin, cos, sqrt, atan2
     
     R = 6371.0  # Earth's radius in kilometers
     lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
@@ -120,11 +122,8 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_thre
     
     # Validate user coordinates
     if not (-90 <= user_lat <= 90 and -180 <= user_lon <= 180):
-        return {"error": "Invalid coordinates provided"}
+        return {"error": "Invalid coordinates: latitude must be -90 to 90, longitude -180 to 180"}
 
-    from fuzzywuzzy import fuzz
-    import pandas as pd
-    
     # Clean and standardize
     df = df.copy()
     disease = disease.lower().strip()
@@ -138,10 +137,9 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_thre
             break
     
     if specialty_col is None:
-        print("Warning: No specialty column found, using all hospitals")
+        logger.warning("No specialty column found, using all hospitals")
         matching_hospitals = df.copy()
     else:
-        # Fuzzy matching for specialties
         def match_disease(specialties):
             if pd.isna(specialties) or not specialties:
                 return False
@@ -153,19 +151,17 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_thre
                         return True
             return False
 
-        # Filter hospitals with matching specialties
         matching_hospitals = df[df[specialty_col].apply(match_disease)].copy()
 
-        # If no hospitals match, use all hospitals
         if matching_hospitals.empty:
-            print(f"No hospitals found for '{disease}', using all hospitals")
+            logger.warning(f"No hospitals found for '{disease}', using all hospitals")
             matching_hospitals = df.copy()
 
     if matching_hospitals.empty:
         return {"error": "No hospitals found"}
 
     # Calculate distances
-    matching_hospitals.loc[:, 'Distance'] = matching_hospitals.apply(
+    matching_hospitals['Distance'] = matching_hospitals.apply(
         lambda row: haversine(user_lat, user_lon, row['Latitude'], row['Longitude']), axis=1
     )
 
@@ -183,7 +179,7 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_thre
     return result
 
 # Initialize everything
-print("Initializing Hospital Recommendation API...")
+logger.info("Initializing Hospital Recommendation API...")
 load_dependencies()
 df = load_hospital_data()
 
@@ -200,7 +196,7 @@ def health():
         "data_loaded": df is not None,
         "hospital_count": len(df) if df is not None else 0,
         "current_directory": current_dir,
-        "files_in_directory": files_in_dir[:10],  # Limit output
+        "files_in_directory": files_in_dir[:10],
         "python_version": sys.version
     }
     
@@ -217,25 +213,39 @@ def api_recommend():
         if not DEPENDENCIES_LOADED:
             return jsonify({"error": "Server dependencies not loaded"}), 500
         
-        # Get JSON data from request
         data = request.get_json()
+        logger.info(f"Received POST request data: {data}")
         
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
         
-        # Extract parameters
-        user_lat = float(data.get('latitude'))
-        user_lon = float(data.get('longitude'))
-        disease = data.get('disease', '').strip()
-        top_n = int(data.get('top_n', 5))
+        # Validate required parameters
+        if 'latitude' not in data or data['latitude'] is None:
+            return jsonify({"error": "Missing or null latitude parameter"}), 400
+        if 'longitude' not in data or data['longitude'] is None:
+            return jsonify({"error": "Missing or null longitude parameter"}), 400
+        if 'disease' not in data or not data['disease'].strip():
+            return jsonify({"error": "Missing or empty disease parameter"}), 400
         
-        if not disease:
-            return jsonify({"error": "Disease parameter is required"}), 400
+        # Convert coordinates
+        try:
+            user_lat = float(data['latitude'])
+            user_lon = float(data['longitude'])
+        except (ValueError, TypeError) as e:
+            logger.error(f"Coordinate conversion error: {str(e)}, latitude: {data.get('latitude')}, longitude: {data.get('longitude')}")
+            return jsonify({"error": f"Invalid numeric coordinates: {str(e)}"}), 400
+        
+        disease = data.get('disease', '').strip()
+        try:
+            top_n = int(data.get('top_n', 5))
+            if top_n <= 0:
+                return jsonify({"error": "top_n must be a positive integer"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid top_n: must be a positive integer"}), 400
         
         # Get recommendations
         recommendations = recommend_hospital(user_lat, user_lon, disease, df, top_n)
         
-        # Check if there's an error in recommendations
         if isinstance(recommendations, dict) and "error" in recommendations:
             return jsonify(recommendations), 400
         
@@ -251,11 +261,8 @@ def api_recommend():
             }
         })
         
-    except ValueError as e:
-        return jsonify({"error": "Invalid input. Please provide valid numeric coordinates."}), 400
-    except KeyError as e:
-        return jsonify({"error": f"Missing required parameter: {str(e)}"}), 400
     except Exception as e:
+        logger.error(f"Unexpected error in POST /api/recommend: {str(e)}")
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
 # GET endpoint for testing
@@ -266,19 +273,35 @@ def api_recommend_get():
         if not DEPENDENCIES_LOADED:
             return jsonify({"error": "Server dependencies not loaded"}), 500
             
-        # Get query parameters
-        user_lat = float(request.args.get('latitude'))
-        user_lon = float(request.args.get('longitude'))
-        disease = request.args.get('disease', '').strip()
-        top_n = int(request.args.get('top_n', 5))
+        logger.info(f"Received GET request args: {request.args}")
         
-        if not disease:
-            return jsonify({"error": "Disease parameter is required"}), 400
+        # Validate required parameters
+        if 'latitude' not in request.args or request.args['latitude'] is None:
+            return jsonify({"error": "Missing or null latitude parameter"}), 400
+        if 'longitude' not in request.args or request.args['longitude'] is None:
+            return jsonify({"error": "Missing or null longitude parameter"}), 400
+        if 'disease' not in request.args or not request.args['disease'].strip():
+            return jsonify({"error": "Missing or empty disease parameter"}), 400
+        
+        # Convert coordinates
+        try:
+            user_lat = float(request.args['latitude'])
+            user_lon = float(request.args['longitude'])
+        except (ValueError, TypeError) as e:
+            logger.error(f"Coordinate conversion error: {str(e)}, latitude: {request.args.get('latitude')}, longitude: {request.args.get('longitude')}")
+            return jsonify({"error": f"Invalid numeric coordinates: {str(e)}"}), 400
+            
+        disease = request.args.get('disease', '').strip()
+        try:
+            top_n = int(request.args.get('top_n', 5))
+            if top_n <= 0:
+                return jsonify({"error": "top_n must be a positive integer"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid top_n: must be a positive integer"}), 400
         
         # Get recommendations
         recommendations = recommend_hospital(user_lat, user_lon, disease, df, top_n)
         
-        # Check if there's an error in recommendations
         if isinstance(recommendations, dict) and "error" in recommendations:
             return jsonify(recommendations), 400
         
@@ -294,9 +317,8 @@ def api_recommend_get():
             }
         })
         
-    except (ValueError, TypeError):
-        return jsonify({"error": "Invalid input. Please provide valid numeric coordinates."}), 400
     except Exception as e:
+        logger.error(f"Unexpected error in GET /api/recommend: {str(e)}")
         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
 
 # Route for the home page
@@ -340,9 +362,10 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
+    logger.error(f"Internal server error: {str(error)}")
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"Starting Flask app on port {port}")
+    logger.info(f"Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
