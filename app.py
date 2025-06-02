@@ -81,22 +81,24 @@ def load_hospital_data():
     return None
 
 def safe_eval_specialties(x):
-    """Safely evaluate specialties column"""
+    """Safely evaluate specialties column, ensuring output is a Python list"""
     if pd.isna(x) or x == '' or x == '[]':
         return []
+    if isinstance(x, (list, np.ndarray, pd.Series)):
+        # Convert arrays or Series to list, ensuring string elements
+        return [str(item).strip() for item in x if str(item).strip()]
     if isinstance(x, str):
         try:
             if x.startswith('[') and x.endswith(']'):
                 result = eval(x)
-                return result if isinstance(result, list) else [str(result)]
+                if isinstance(result, (list, np.ndarray)):
+                    return [str(item).strip() for item in result if str(item).strip()]
+                return [str(result).strip()] if str(result).strip() else []
             else:
                 return [item.strip() for item in x.split(',') if item.strip()]
         except:
-            return [x] if x else []
-    elif isinstance(x, list):
-        return x
-    else:
-        return [str(x)] if x else []
+            return [x.strip()] if x.strip() else []
+    return [str(x).strip()] if str(x).strip() else []
 
 def haversine(lat1, lon1, lat2, lon2):
     """Calculate distance between two coordinates in kilometers"""
@@ -111,6 +113,20 @@ def haversine(lat1, lon1, lat2, lon2):
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
     distance = R * c
     return distance
+
+def is_empty_safe(obj):
+    """Safely check if an object is empty without boolean ambiguity"""
+    if obj is None:
+        return True
+    if pd.isna(obj):
+        return True
+    if isinstance(obj, str):
+        return len(obj.strip()) == 0
+    if isinstance(obj, (list, tuple)):
+        return len(obj) == 0
+    if isinstance(obj, (np.ndarray, pd.Series)):
+        return obj.size == 0
+    return False
 
 def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_threshold=80):
     """Recommend nearest hospitals for a specific disease"""
@@ -140,18 +156,53 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_thre
         logger.warning("No specialty column found, using all hospitals")
         matching_hospitals = df.copy()
     else:
-        def match_disease(specialties):
-            if pd.isna(specialties) or not specialties:
+        def match_disease_safe(specialties):
+            """Match disease against specialties with proper numpy/pandas handling"""
+            try:
+                logger.debug(f"Processing specialties: type={type(specialties)}, value={specialties}")
+                
+                # Handle NaN/None values first
+                if pd.isna(specialties) or specialties is None:
+                    return False
+                
+                # Convert numpy arrays and pandas Series to Python list
+                if isinstance(specialties, (np.ndarray, pd.Series)):
+                    if specialties.size == 0:  # Use .size for numpy arrays
+                        return False
+                    specialties = specialties.tolist()
+                
+                # Handle different data types safely
+                if isinstance(specialties, list):
+                    if len(specialties) == 0:
+                        return False
+                    # Process list of specialties
+                    for specialty in specialties:
+                        if specialty is not None and str(specialty).strip():
+                            if fuzz.partial_ratio(disease, str(specialty).lower()) >= similarity_threshold:
+                                return True
+                    return False
+                elif isinstance(specialties, str):
+                    if not specialties.strip():
+                        return False
+                    return fuzz.partial_ratio(disease, specialties.lower()) >= similarity_threshold
+                else:
+                    # Handle other types by converting to string
+                    specialty_str = str(specialties).strip()
+                    if not specialty_str or specialty_str.lower() in ['nan', 'none', '']:
+                        return False
+                    return fuzz.partial_ratio(disease, specialty_str.lower()) >= similarity_threshold
+                    
+            except Exception as e:
+                logger.error(f"Error in match_disease_safe for {specialties}: {str(e)}")
                 return False
-            if isinstance(specialties, str):
-                return fuzz.partial_ratio(disease, specialties.lower()) >= similarity_threshold
-            elif isinstance(specialties, list):
-                for specialty in specialties:
-                    if fuzz.partial_ratio(disease, str(specialty).lower()) >= similarity_threshold:
-                        return True
-            return False
 
-        matching_hospitals = df[df[specialty_col].apply(match_disease)].copy()
+        try:
+            # Apply the matching function safely
+            mask = df[specialty_col].apply(match_disease_safe)
+            matching_hospitals = df[mask].copy()
+        except Exception as e:
+            logger.error(f"Error applying match_disease_safe: {str(e)}")
+            return {"error": f"Failed to filter hospitals: {str(e)}"}
 
         if matching_hospitals.empty:
             logger.warning(f"No hospitals found for '{disease}', using all hospitals")
@@ -160,10 +211,26 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_thre
     if matching_hospitals.empty:
         return {"error": "No hospitals found"}
 
-    # Calculate distances
-    matching_hospitals['Distance'] = matching_hospitals.apply(
-        lambda row: haversine(user_lat, user_lon, row['Latitude'], row['Longitude']), axis=1
-    )
+    # Calculate distances safely
+    try:
+        def safe_distance_calc(row):
+            try:
+                return haversine(user_lat, user_lon, row['Latitude'], row['Longitude'])
+            except Exception as e:
+                logger.error(f"Error calculating distance for row: {str(e)}")
+                return float('inf')  # Put problematic hospitals at the end
+        
+        matching_hospitals['Distance'] = matching_hospitals.apply(safe_distance_calc, axis=1)
+        
+        # Remove hospitals with infinite distance (calculation errors)
+        matching_hospitals = matching_hospitals[matching_hospitals['Distance'] != float('inf')]
+        
+    except Exception as e:
+        logger.error(f"Error calculating distances: {str(e)}")
+        return {"error": f"Failed to calculate distances: {str(e)}"}
+
+    if matching_hospitals.empty:
+        return {"error": "No hospitals found after distance calculation"}
 
     # Sort by distance and select top N
     nearest_hospitals = matching_hospitals.sort_values(by='Distance').head(top_n)
@@ -175,8 +242,18 @@ def recommend_hospital(user_lat, user_lon, disease, df, top_n=5, similarity_thre
     ]
     available_columns = [col for col in result_columns if col in nearest_hospitals.columns]
     
-    result = nearest_hospitals[available_columns].to_dict(orient='records')
-    return result
+    # Convert to dict safely
+    try:
+        result = nearest_hospitals[available_columns].to_dict(orient='records')
+        # Clean up any NaN values in the result
+        for hospital in result:
+            for key, value in hospital.items():
+                if pd.isna(value):
+                    hospital[key] = None
+        return result
+    except Exception as e:
+        logger.error(f"Error preparing result: {str(e)}")
+        return {"error": f"Failed to prepare results: {str(e)}"}
 
 # Initialize everything
 logger.info("Initializing Hospital Recommendation API...")
