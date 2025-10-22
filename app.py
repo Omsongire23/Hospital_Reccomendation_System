@@ -7,6 +7,7 @@ import numpy as np
 from math import radians, sin, cos, sqrt, atan2
 from fuzzywuzzy import fuzz
 
+
 # Initialize Flask app
 app = Flask(__name__)
 
